@@ -1,0 +1,132 @@
+#!/bin/sh
+#
+# treeForge – build a file/directory tree from a diagram file
+#
+# Author:  Senior Bash Engineer
+# Date:    2025‑08‑18
+#
+# Usage:  treeForge [options] <diagram_file> [destination_dir]
+#
+# Options:
+#   -l <depth>      Limit the tree depth to <depth> (0 = unlimited, default)
+#   -g              Enable .gitignore handling (default)
+#   -n              Disable .gitignore handling
+#   -h              Show this help message
+#
+# The script expects an auxiliary file `functions.sh` in the same directory.
+# That file must export the functions used below (process_line, etc.).
+#
+
+# --------------------------------------------------------------------------- #
+# Helper: print usage and exit
+# --------------------------------------------------------------------------- #
+usage() {
+    cat <<EOF 1>&2
+Usage: $0 [options] <diagram_file> [destination_dir]
+Options:
+  -l <depth>      Limit the tree depth to <depth> (0 = unlimited, default)
+  -g              Enable .gitignore handling (default)
+  -n              Disable .gitignore handling
+  -h              Show this help message
+EOF
+    exit 1
+}
+
+# --------------------------------------------------------------------------- #
+# Parse command‑line arguments
+# --------------------------------------------------------------------------- #
+USE_GITIGNORE=1        # default: honour .gitignore
+LEVEL_LIMIT=0          # default: no depth limit
+
+# Shift through flags
+while getopts ":l:gnh" opt; do
+    case $opt in
+        l)
+            case "$OPTARG" in
+                ''|*[!0-9]*) echo "ERROR: -l requires a numeric argument" >&2; usage ;;
+            esac
+            LEVEL_LIMIT=$OPTARG
+            ;;
+        g) USE_GITIGNORE=1 ;;
+        n) USE_GITIGNORE=0 ;;
+        h) usage ;;
+        \?)
+            echo "ERROR: Unknown option -$OPTARG" >&2
+            usage ;;
+    esac
+done
+shift $((OPTIND - 1))
+
+# --------------------------------------------------------------------------- #
+# Require at least one positional argument (diagram file)
+# --------------------------------------------------------------------------- #
+if [ $# -lt 1 ]; then
+    echo "ERROR: Diagram file is mandatory" >&2
+    usage
+fi
+
+DIAGRAM_FILE=$1
+shift
+
+# --------------------------------------------------------------------------- #
+# Destination directory: default = current working directory
+# --------------------------------------------------------------------------- #
+if [ $# -ge 1 ]; then
+    DEST_DIR=$1
+else
+    DEST_DIR=$(pwd)
+fi
+
+# Resolve DEST_DIR to an absolute path
+# Use `cd` + `pwd` to be POSIX‑compatible (readlink -f is not guaranteed)
+if [ ! -d "$DEST_DIR" ]; then
+    echo "ERROR: Destination directory '$DEST_DIR' does not exist or is not a directory" >&2
+    exit 1
+fi
+
+ROOT_DIR=$(cd "$DEST_DIR" && pwd)
+
+# --------------------------------------------------------------------------- #
+# .gitignore path (if it exists)
+# --------------------------------------------------------------------------- #
+GITIGNORE_PATH="$ROOT_DIR/.gitignore"
+if [ ! -e "$GITIGNORE_PATH" ]; then
+    GITIGNORE_PATH=
+fi
+
+# --------------------------------------------------------------------------- #
+# Export variables that functions.sh expects
+# --------------------------------------------------------------------------- #
+export ROOT_DIR
+export LEVEL_LIMIT
+export USE_GITIGNORE
+export GITIGNORE_PATH
+
+# --------------------------------------------------------------------------- #
+# Source helper functions from the external location
+# --------------------------------------------------------------------------- #
+FUNCTIONS_PATH="/Users/wilsonchung/www/my/TreeForge/functions.sh"
+
+if [ ! -f "$FUNCTIONS_PATH" ]; then
+    echo "ERROR: Unable to locate functions file at $FUNCTIONS_PATH" >&2
+    exit 1
+fi
+
+. "$FUNCTIONS_PATH"
+
+# --------------------------------------------------------------------------- #
+# Main processing loop
+# --------------------------------------------------------------------------- #
+# Read the diagram file line by line, preserving empty lines
+# (the helper functions already trim trailing newlines)
+while IFS= read -r line || [ -n "$line" ]; do
+    # Skip empty lines – they are ignored by process_line
+    [ -z "$line" ] && continue
+
+    # Process the single line
+    process_line "$line"
+done < "$DIAGRAM_FILE"
+
+echo "Tree creation completed."
+
+# End of script
