@@ -1,0 +1,8 @@
+app
+ ┣ subdir
+ ┃ ┃ ┣ file3-1.py
+ ┃ ┃ ┗ file3-2.py
+ ┃ ┣ file2-1.py
+ ┃ ┗ file2-2.py
+ ┣ file1-1.md
+ ┣ file1-2.json
