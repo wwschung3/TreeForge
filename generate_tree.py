@@ -48,7 +48,7 @@ def walk_dir(
         - extension: (only for files)
         - children: (only for dirs)
     """
-    ignore = ignore or {"__pycache__", ".DS_Store"}
+    ignore = ignore or {"__pycache__", ".DS_Store", ".git"}
     items = []
 
     for child in sorted(path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower())):
