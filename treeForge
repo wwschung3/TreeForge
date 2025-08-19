@@ -1,9 +1,9 @@
 #!/bin/sh
 #
-# treeForge – build a file/directory tree from a diagram file
+# treeForge – build a file/directory tree from a diagram file (txt or json)
 #
 # Author:  Senior Bash Engineer
-# Date:    2025‑08‑18
+# Date:    2025‑08‑19
 #
 # Usage:  treeForge [options] <diagram_file> [destination_dir]
 #
@@ -78,7 +78,6 @@ else
 fi
 
 # Resolve DEST_DIR to an absolute path
-# Use `cd` + `pwd` to be POSIX‑compatible (readlink -f is not guaranteed)
 if [ ! -d "$DEST_DIR" ]; then
     echo "ERROR: Destination directory '$DEST_DIR' does not exist or is not a directory" >&2
     exit 1
@@ -107,12 +106,9 @@ export GITIGNORE_PATH
 # --------------------------------------------------------------------------- #
 
 # Global variable to maintain the path context
-# It will be an array where each index corresponds to a depth level
 declare -a PATH_STACK
 
 # Define all known tree diagram glyphs
-# Note: The first item is a non-breaking space (U+00A0), which often looks like a regular space
-# but is not treated the same way by shell scripts.
 declare -a TREE_GLYPHS=(' ' ' ' '│' '┃' '├' '┣' '└' '┗' '─' '──')
 
 # --------------------------------------------------------------------------- #
@@ -121,7 +117,6 @@ declare -a TREE_GLYPHS=(' ' ' ' '│' '┃' '├' '┣' '└' '┗' '─' '─�
 
 # trim_trailing_newlines - remove trailing CR/LF from a string
 trim_trailing_newlines() {
-    # $1 – string
     printf '%s' "$1" | tr -d '\r\n'
 }
 
@@ -130,11 +125,6 @@ trim_trailing_newlines() {
 # --------------------------------------------------------------------------- #
 
 # parse_line
-#   Given a raw diagram line, determine the depth (number of tree
-#   characters) and the relative path.
-#   Returns the depth in the global variable LINE_DEPTH
-#   and the relative path in the global variable REL_PATH.
-#   The function assumes the line is non‑empty.
 parse_line() {
     local raw_line="$1"
     local rest="${raw_line}"
@@ -160,8 +150,6 @@ parse_line() {
 
         LINE_DEPTH=$((LINE_DEPTH + 1))
         rest="${rest#"$matched"}"
-
-        # After removing a glyph there might be a space; skip it
         rest="${rest#"${rest%%[![:space:]]*}"}"
     done
 
@@ -169,20 +157,53 @@ parse_line() {
     local item_name="${rest}"
 
     # --- 4. Build the full relative path using the path stack
-    # Trim the stack to the current depth
     PATH_STACK=("${PATH_STACK[@]:0:$LINE_DEPTH}")
-
-    # Add the current item to the stack
     PATH_STACK[$LINE_DEPTH]="$item_name"
-
-    # Join the stack elements to create the full relative path
     local path_components
-    path_components=$(IFS=/; echo "${PATH_STACK[*]:1}") # skip the root
-
+    path_components=$(IFS=/; echo "${PATH_STACK[*]:1}")
     REL_PATH="$path_components"
 
     export LINE_DEPTH
     export REL_PATH
+}
+
+# parse_json_item
+#   Process a single JSON item (file or directory) from project_structure.json
+#   Parameters:
+#     $1 – JSON item (path, type, children)
+#     $2 – current depth
+parse_json_item() {
+    local json_item="$1"
+    local depth="$2"
+
+    # Extract path and type using basic string manipulation (requires jq)
+    local path=$(echo "$json_item" | jq -r '.path')
+    local type=$(echo "$json_item" | jq -r '.type')
+
+    # Set global variables for consistency with parse_line
+    LINE_DEPTH=$depth
+    REL_PATH="$path"
+
+    # Check if item should be created
+    should_create || return 0
+
+    # Check if item is gitignored
+    if is_gitignored; then
+        printf 'Ignored by .gitignore: %s\n' "$REL_PATH"
+        return 0
+    fi
+
+    # Create the item
+    create_item
+
+    # If directory, process children recursively
+    if [ "$type" = "dir" ]; then
+        local children=$(echo "$json_item" | jq -c '.children[]')
+        local child
+        echo "$children" | while IFS= read -r child; do
+            parse_json_item "$child" $((depth + 1))
+        done
+    fi
 }
 
 # --------------------------------------------------------------------------- #
@@ -190,20 +211,12 @@ parse_line() {
 # --------------------------------------------------------------------------- #
 
 # should_create
-#   Decide whether an item should be created:
-#   * it must not already exist under ROOT_DIR
-#   * its depth must be within LEVEL_LIMIT (if non‑zero)
-#   Sets EXIT_STATUS: 0 – create, 1 – skip
 should_create() {
-    # Skip if depth is beyond the requested level
     if [ "$LEVEL_LIMIT" -gt 0 ] && [ "$LINE_DEPTH" -gt "$LEVEL_LIMIT" ]; then
         return 1
     fi
 
-    # Resolve absolute path
     local abs_path="$ROOT_DIR/$REL_PATH"
-
-    # Skip if the path already exists
     if [ -e "$abs_path" ]; then
         return 1
     fi
@@ -212,46 +225,31 @@ should_create() {
 }
 
 # is_gitignored
-#   Return 0 if REL_PATH matches a rule in the .gitignore file.
-#   Implements a very small subset of the syntax:
-#     * matches glob patterns (case statement)
-#     * directory patterns (trailing '/')
-#     * literal paths
-#   If GITIGNORE_PATH is empty or not readable, it returns 1 (not ignored).
 is_gitignored() {
-    # Bail out if .gitignore handling is disabled
     if [ "$USE_GITIGNORE" -ne 1 ] || [ -z "$GITIGNORE_PATH" ]; then
         return 1
     fi
 
-    # Return 1 if the .gitignore file is not readable
     if [ ! -r "$GITIGNORE_PATH" ]; then
         return 1
     fi
 
-    # Iterate over each rule in the .gitignore file
     while IFS= read -r rule || [ -n "$rule" ]; do
-        # Trim leading/trailing whitespace
         rule=$(printf '%s' "$rule" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
-        # Skip empty lines or comments (lines starting with '#')
         if [ -z "$rule" ] || [ "${rule#\#}" != "$rule" ]; then
             continue
         fi
 
-        # Convert directory patterns (ending with '/') to glob patterns
         pattern="$rule"
         case "$pattern" in
             */) pattern="${rule%/}/*" ;;
         esac
 
-        # Perform a glob match against REL_PATH
         case "$REL_PATH" in
             $pattern) return 0 ;;
         esac
     done < "$GITIGNORE_PATH"
 
-    # No rule matched – not ignored
     return 1
 }
 
@@ -260,18 +258,11 @@ is_gitignored() {
 # --------------------------------------------------------------------------- #
 
 # create_item
-#   Creates the file or directory represented by REL_PATH.
-#   A simple heuristic is used to decide the type:
-#     * if REL_PATH contains a dot ('.') → file
-#     * otherwise → directory
-#   The function always calls `mkdir -p` for directories so that
-#   any intermediate parents are created as well.
 create_item() {
     local abs_path="$ROOT_DIR/$REL_PATH"
 
     case "$REL_PATH" in
         *.*)  # contains a dot → treat as file
-            # Create an empty file
             if ! touch "$abs_path" 2>/dev/null; then
                 printf 'ERROR: Failed to touch file "%s"\n' "$abs_path" >&2
                 exit 1
@@ -293,46 +284,45 @@ create_item() {
 # --------------------------------------------------------------------------- #
 
 # process_line
-#   Called by the main script for every diagram line.
-#   Performs the full cycle:
-#   1. parse_line → depth & path
-#   2. should_create
-#   3. honour .gitignore (if enabled)
-#   4. create_item
-#
-#   Parameters:
-#     $1 – the raw diagram line
 process_line() {
     local raw_line="$1"
-
-    # 1. Parse the line
+    [ -z "$raw_line" ] && return 0
     parse_line "$raw_line"
-
-    # 2. Decide if we should even attempt to create it
-    should_create || return 0   # nothing to do – skip
-
-    # 3. If .gitignore is requested, check whether the item is ignored
+    should_create || return 0
     if is_gitignored; then
         printf 'Ignored by .gitignore: %s\n' "$REL_PATH"
         return 0
     fi
-
-    # 4. Create the item
     create_item
 }
 
 # --------------------------------------------------------------------------- #
 # Main processing loop
 # --------------------------------------------------------------------------- #
-# Read the diagram file line by line, preserving empty lines
-# (the helper functions already trim trailing newlines)
-while IFS= read -r line || [ -n "$line" ]; do
-    # Skip empty lines – they are ignored by process_line
-    [ -z "$line" ] && continue
 
-    # Process the single line
-    process_line "$line"
-done < "$DIAGRAM_FILE"
+# Check file extension to determine processing method
+case "$DIAGRAM_FILE" in
+    *.json)
+        # Ensure jq is available
+        if ! command -v jq >/dev/null 2>&1; then
+            echo "ERROR: jq is required to process JSON files" >&2
+            exit 1
+        fi
+
+        # Read and process JSON file
+        items=$(jq -c '.[]' "$DIAGRAM_FILE")
+        echo "$items" | while IFS= read -r item; do
+            parse_json_item "$item" 1
+        done
+        ;;
+    *)
+        # Process text file as before
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -z "$line" ] && continue
+            process_line "$line"
+        done < "$DIAGRAM_FILE"
+        ;;
+esac
 
 echo "Tree creation completed."
 
